@@ -1,27 +1,123 @@
 ---
-title: "Making sense of the SCAA’s new Flavor Wheel"
-date: 2016-12-17T15:04:10.000Z
-description: The Coffee Taster’s Flavor Wheel, the official resource used by coffee tasters, has been revised for the first time this year.
+title: Send Monit Alerts to Slack
+date: 2017-04-30T10:04:10-04:00
+description: >-
+  Learn how to install Monit on a Ubuntu server and send its alerts to a Slack
+  channel
 image: /img/blog/flavor_wheel.jpg
 ---
+This post will show you how to install Monit on a Ubuntu server to send alerts to you on Slack. If you're not using Slack, this post is still applicable as instructions for installation.
 
-The SCAA updated the wheel to reflect the finer nuances needed to describe flavors more precisely. The new descriptions are more detailed and hence allow cuppers to distinguish between more flavors.
+## Installing Monit
+This is as easy as `sudo apt-get install monit`. Just a heads-up to ServerPilot users, you'll have to SSH in to your server as `root` or another user with root/sudo priviledges. If you do SSH in as root, you can leave off all of the `sudo`s.
 
-While this is going to be a big change for professional coffee tasters, it means a lot to you as a consumer as well. We’ll explain how the wheel came to be, how pros use it and what the flavors actually mean.
+Now that Monit is installed, the next step is to turn it on so `cd /etc/monit`. If you `tree` here, you'll see the following directory structure:
 
-## What the updates mean to you
+```terminal
+$ tree /etc/monit
+/etc/monit
+├── conf.d
+│   └── services
+├── monitrc
+├── monitrc.d
+│   ├── acpid
+│   ├── apache2
+│   ├── at
+│   ├── cron
+│   ├── mdadm
+│   ├── memcached
+│   ├── mysql
+│   ├── nginx
+│   ├── openntpd
+│   ├── openssh-server
+│   ├── pdns-recursor
+│   ├── postfix
+│   ├── rsyslog
+│   ├── smartmontools
+│   └── snmpd
+└── templates
+    ├── rootbin
+    ├── rootrc
+    └── rootstrict
 
-The Specialty Coffee Association of America (SCAA), founded in 1982, is a non-profit trade organization for the specialty coffee industry. With members located in more than 40 countries, SCAA represents every segment of the specialty coffee industry, including:
+3 directories, 20 files
+```
 
-- producers
-- roasters
-- importers/exporters
-- retailers
-- manufacturers
-- baristas
+## Configure Monit
+The first thing we'll need to do is edit the `monitrc` file so `sudo nano monitrc`. Now scroll down and uncomment the following lines:
 
-For over 30 years, SCAA has been dedicated to creating a vibrant specialty coffee community by recognizing, developing and promoting specialty coffee. SCAA sets and maintains quality standards for the industry, conducts market research, and provides education, training, resources, and business services for its members.
+```shell
+set httpd port 2812 and
+use address localhost
+allow localhost
+```
 
-Coffee cupping, or coffee tasting, is the practice of observing the tastes and aromas of brewed coffee. It is a professional practice but can be done informally by anyone or by professionals known as "Q Graders". A standard coffee cupping procedure involves deeply sniffing the coffee, then loudly slurping the coffee so it spreads to the back of the tongue.
+Then scroll down just a bit to under the Services section and uncomment the part about checking general system resources. **Be sure** to change `myhost.mydomain.tld` to match your server. So you should have the following lines uncommented:
 
-The coffee taster attempts to measure aspects of the coffee's taste, specifically the body (the texture or mouthfeel, such as oiliness), sweetness, acidity (a sharp and tangy feeling, like when biting into an orange), flavour (the characters in the cup), and aftertaste. Since coffee beans embody telltale flavours from the region where they were grown, cuppers may attempt to identify the coffee's origin.
+```shell
+check system myhost.mydomain.tld
+  if loadavg (1min) > 4 then alert
+  if loadavg (5min) > 2 then alert
+  if memory usage > 75% then alert
+  if swap usage > 20% then alert
+  if cpu usage (user) > 70% then alert
+  if cpu usage (system) > 30% then alert
+  if cpu usage (wait) > 20% then alert
+```
+
+Now that Monit is set up, we need to configure it to monitor our chosen services. If you read the `monitrc` file, you would have found that the last line is to include any files in the `conf.d` folder. This is where we'll put our custom services file so `sudo nano conf.d/services`. You can check out Monit's [configuration examples](https://mmonit.com/wiki/Monit/ConfigurationExamples) but here's my file:
+
+```shell
+check process nginx with pidfile /var/run/nginx-sp.pid
+  group serverpilot
+  start program = "/etc/init.d/nginx-sp start"
+  stop program = "/etc/init.d/nginx-sp stop"
+  if changed pid then exec "/etc/monit/slack.sh"
+
+check process mysql with pidfile /var/run/mysqld/mysqld.pid
+  start program = "/etc/init.d/mysql start"
+  stop program = "/etc/init.d/mysql stop"
+  if failed unixsocket /var/run/mysqld/mysqld.sock then restart
+  if 5 restarts within 5 cycles then timeout
+  if changed pid then exec "/etc/monit/slack.sh"
+
+check process php5-fpm with pidfile /var/run/php5.5-fpm-sp.pid
+  start program = "/etc/init.d/php5.5-fpm-sp start"
+  stop program = "/etc/init.d/php5.5-fpm-sp stop"
+  if changed pid then exec "/etc/monit/slack.sh"
+```
+
+The `-sp` suffix is if you're using ServerPilot, but if you're not just leave it off. If you're in doubt of the name of the pid, just `ls /var/run` to double-check. Once that's done we can check that everything is configured correctly with `sudo monit -t`. If successful, then restart Monit with `sudo service monit restart` and start monitoring your configured services with `sudo monit start all`. Finally, you can double-check that everything is running with `sudo monit status`.
+
+## Send Monit Alerts to Slack
+The first thing you'll have to do is set up an Incoming Webhook with your Slack team and copy the url for later. Now we'll configure a payload to send to Slack. So from still within the `/etc/monit` directory, go ahead and `sudo nano slack.sh`. **Be sure** to change the channel, username, and emoji name to your choosing.
+
+```shell
+#!/bin/sh
+/usr/bin/curl \
+  -X POST \
+  -s \
+  --data-urlencode "payload={ \
+    \"channel\": \"#slack-channel\", \
+    \"username\": \"monit-serverName\", \
+    \"icon_emoji\": \":emoji-name:\", \
+    \"text\": \"$MONIT_DATE - $MONIT_SERVICE - $MONIT_DESCRIPTION\" \
+  }" \
+  https://hooks.slack.com/services/blahblah/blahblah/blahblahblah
+```
+
+Now we need to make sure that Monit can execute this script so `chmod 744 slack.sh`. Next, we need to tell Monit to run the Slack script when it needs to send an alert so `sudo nano monitrc`. In the section about checking general system resources, replace `then alert` with `then exec "/etc/monit/slack.sh" else if succeeded then exec "/etc/monit/slack.sh"`. At the end it should look like this:
+
+```shell
+check system myhost.mydomain.tld
+  if loadavg (1min) > 4 then exec "/etc/monit/slack.sh" else if succeeded then exec "/etc/monit/slack.sh"
+  if loadavg (5min) > 2 then exec "/etc/monit/slack.sh" else if succeeded then exec "/etc/monit/slack.sh"
+  if memory usage > 75% then exec "/etc/monit/slack.sh" else if succeeded then exec "/etc/monit/slack.sh"
+  if swap usage > 40% then exec "/etc/monit/slack.sh" else if succeeded then exec "/etc/monit/slack.sh"
+  if cpu usage (user) > 70% then exec "/etc/monit/slack.sh" else if succeeded then exec "/etc/monit/slack.sh"
+  if cpu usage (system) > 30% then exec "/etc/monit/slack.sh" else if succeeded then exec "/etc/monit/slack.sh"
+  if cpu usage (wait) > 20% then exec "/etc/monit/slack.sh" else if succeeded then exec "/etc/monit/slack.sh"
+```
+
+Finally, we can make sure everything is configured correctly with `sudo monit -t` and restart Monit to put our changes in to effect with `sudo service monit restart`.
+
